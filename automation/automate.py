@@ -484,8 +484,41 @@ def export_to_json(task_id: str, db_path: str = "domain_pricing.db") -> str:
     return json_filename
 
 
+<<<<<<< HEAD
 def run_automation(task_id: str, url: str, timeout: int, headless: bool,
                    db_path: str = "domain_pricing.db") -> Dict[str, Any]:
+=======
+def clear_database(db_path: str = "domain_pricing.db"):
+    """
+    Clear all data from the database tables
+    
+    Args:
+        db_path: Path to SQLite database file
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        logger.info("Clearing all data from database...")
+        
+        # Delete all records from tables
+        cursor.execute("DELETE FROM structured_pricing")
+        deleted_pricing = cursor.rowcount
+        
+        cursor.execute("DELETE FROM raw_data")
+        deleted_raw = cursor.rowcount
+        
+        cursor.execute("DELETE FROM scraping_tasks")
+        deleted_tasks = cursor.rowcount
+        
+        conn.commit()
+        
+        logger.info(f"Database cleared: {deleted_pricing} pricing records, "
+                   f"{deleted_raw} raw data records, {deleted_tasks} tasks removed")
+
+
+def run_automation(task_id: str, url: str, timeout: int, headless: bool,
+                   db_path: str = "domain_pricing.db", clear_before_run: bool = True) -> Dict[str, Any]:
+>>>>>>> be4609f444859a89faaa458803237e8f1b905a6c
     """
     Main automation function
     
@@ -495,6 +528,10 @@ def run_automation(task_id: str, url: str, timeout: int, headless: bool,
         timeout: Maximum wait time for elements
         headless: Run in headless mode
         db_path: Path to SQLite database
+<<<<<<< HEAD
+=======
+        clear_before_run: Clear database before running (default: True)
+>>>>>>> be4609f444859a89faaa458803237e8f1b905a6c
         
     Returns:
         Dictionary containing automation results or error information
@@ -504,6 +541,13 @@ def run_automation(task_id: str, url: str, timeout: int, headless: bool,
     # Initialize database
     init_database(db_path)
     
+<<<<<<< HEAD
+=======
+    # Clear database if requested
+    if clear_before_run:
+        clear_database(db_path)
+    
+>>>>>>> be4609f444859a89faaa458803237e8f1b905a6c
     try:
         logger.info(f"Task {task_id}: Starting automation for {url}")
         
