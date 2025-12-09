@@ -500,4 +500,5 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8080))  # Changed from 8000 to 8080 and added PORT env var
+    uvicorn.run(app, host="0.0.0.0", port=port)
