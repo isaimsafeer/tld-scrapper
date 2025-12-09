@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Domain Pricing & Automation Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .tab-btn {
+            padding: 12px 24px;
+            background: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .tab-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        }
+
+        .tab-btn.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .tab-content {
+            display: none;
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+        }
+
+        .tab-content.active {
+            display: block;
+            animation: fadeIn 0.3s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+        }
+
+        input[type="text"],
+        input[type="url"],
+        input[type="number"],
+        select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus,
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .btn {
+            padding: 12px 32px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .filter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .results {
+            margin-top: 30px;
+        }
+
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        .result-count {
+            font-size: 18px;
+            font-weight: 600;
+            color: #667eea;
+        }
+
+        .table-container {
+            overflow-x: auto;
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+        }
+
+        th {
+            background: #f8f9fa;
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            color: #555;
+            border-bottom: 2px solid #e0e0e0;
+        }
+
+        td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        tr:hover {
+            background: #f8f9fa;
+        }
+
+        .price {
+            font-weight: 700;
+            color: #27ae60;
+            font-size: 16px;
+        }
+
+        .promo-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            background: #ffeaa7;
+            color: #d63031;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status-badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            display: inline-block;
+        }
+
+        .status-queued {
+            background: #ffeaa7;
+            color: #d63031;
+        }
+
+        .status-running {
+            background: #74b9ff;
+            color: #0984e3;
+        }
+
+        .status-completed {
+            background: #55efc4;
+            color: #00b894;
+        }
+
+        .status-failed {
+            background: #ff7675;
+            color: #d63031;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            border-radius: 12px;
+            color: white;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+
+        .stat-label {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+        }
+
+        .error {
+            background: #ff7675;
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+
+        .success {
+            background: #55efc4;
+            color: #00b894;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+            box-shadow: 0 4px 12px rgba(108, 117, 125, 0.3);
+        }
+
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌐 Domain Pricing & Automation Dashboard</h1>
+
+        <div class="tabs">
+            <button class="tab-btn active" onclick="switchTab('pricing')">📊 Pricing Search</button>
+            <button class="tab-btn" onclick="switchTab('cheapest')">💰 Cheapest Deals</button>
+            <button class="tab-btn" onclick="switchTab('stats')">📈 Statistics</button>
+            <button class="tab-btn" onclick="switchTab('automation')">🤖 Automation</button>
+        </div>
+
+        <!-- Pricing Search Tab -->
+        <div id="pricing-tab" class="tab-content active">
+            <h2 style="margin-bottom: 20px;">Search Domain Pricing</h2>
+            
+            <div class="filter-grid">
+                <div class="form-group">
+                    <label>TLD</label>
+                    <input type="text" id="tld" placeholder="e.g., .com, io">
+                </div>
+                <div class="form-group">
+                    <label>Registrar</label>
+                    <input type="text" id="registrar" placeholder="e.g., spaceship, cloudflare">
+                </div>
+                <div class="form-group">
+                    <label>Operation</label>
+                    <select id="operation">
+                        <option value="">All</option>
+                        <option value="register">Register</option>
+                        <option value="renew">Renew</option>
+                        <option value="transfer">Transfer</option>
+                        <option value="multi_year">Multi Year</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Min Price</label>
+                    <input type="number" id="min_price" placeholder="0" min="0" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label>Max Price</label>
+                    <input type="number" id="max_price" placeholder="100" min="0" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label>Currency</label>
+                    <select id="currency">
+                        <option value="">All</option>
+                        <option value="USD">USD</option>
+                        <option value="GBP">GBP</option>
+                        <option value="EUR">EUR</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Years</label>
+                    <input type="number" id="years" placeholder="1" min="1" max="10">
+                </div>
+                <div class="form-group">
+                    <label>Sort By</label>
+                    <select id="sort_by">
+                        <option value="price">Price</option>
+                        <option value="tld">TLD</option>
+                        <option value="registrar">Registrar</option>
+                        <option value="scraped_at">Scraped Date</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Sort Order</label>
+                    <select id="sort_order">
+                        <option value="asc">Ascending</option>
+                        <option value="desc">Descending</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Results Limit</label>
+                    <input type="number" id="limit" placeholder="50" min="1" value="50">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="checkbox-group">
+                    <input type="checkbox" id="has_promo">
+                    <label style="margin: 0;">Only show deals with promo codes</label>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn" onclick="searchPricing()">🔍 Search</button>
+                <button class="btn btn-secondary" onclick="clearFilters()">Clear Filters</button>
+            </div>
+
+            <div id="pricing-results" class="results"></div>
+        </div>
+
+        <!-- Cheapest Deals Tab -->
+        <div id="cheapest-tab" class="tab-content">
+            <h2 style="margin-bottom: 20px;">Find Cheapest Deals</h2>
+            
+            <div class="filter-grid">
+                <div class="form-group">
+                    <label>TLD</label>
+                    <input type="text" id="cheapest_tld" placeholder="e.g., .com">
+                </div>
+                <div class="form-group">
+                    <label>Operation</label>
+                    <select id="cheapest_operation">
+                        <option value="">All</option>
+                        <option value="register">Register</option>
+                        <option value="renew">Renew</option>
+                        <option value="transfer">Transfer</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Currency</label>
+                    <select id="cheapest_currency">
+                        <option value="USD">USD</option>
+                        <option value="GBP">GBP</option>
+                        <option value="EUR">EUR</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Group By</label>
+                    <select id="group_by">
+                        <option value="tld">TLD</option>
+                        <option value="operation">Operation</option>
+                        <option value="registrar">Registrar</option>
+                    </select>
+                </div>
+            </div>
+
+            <button class="btn" onclick="searchCheapest()">💰 Find Cheapest</button>
+
+            <div id="cheapest-results" class="results"></div>
+        </div>
+
+        <!-- Statistics Tab -->
+        <div id="stats-tab" class="tab-content">
+            <h2 style="margin-bottom: 20px;">Pricing Statistics</h2>
+            <button class="btn" onclick="loadStats()">📊 Load Statistics</button>
+            <div id="stats-results" class="results"></div>
+        </div>
+
+        <!-- Automation Tab -->
+        <div id="automation-tab" class="tab-content">
+            <h2 style="margin-bottom: 20px;">Web Automation</h2>
+            
+            <div class="form-group">
+                <label>Target URL</label>
+                <input type="url" id="automation_url" placeholder="https://example.com" value="https://www.example.com">
+            </div>
+
+            <div class="filter-grid">
+                <div class="form-group">
+                    <label>Timeout (seconds)</label>
+                    <input type="number" id="timeout" placeholder="10" value="10" min="1">
+                </div>
+                <div class="form-group">
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="headless" checked>
+                        <label style="margin: 0;">Headless Mode</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn" onclick="triggerAutomation()">🚀 Start Automation</button>
+            </div>
+
+            <div id="automation-results" class="results"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+            event.target.classList.add('active');
+        }
+
+        function clearFilters() {
+            document.getElementById('tld').value = '';
+            document.getElementById('registrar').value = '';
+            document.getElementById('operation').value = '';
+            document.getElementById('min_price').value = '';
+            document.getElementById('max_price').value = '';
+            document.getElementById('currency').value = '';
+            document.getElementById('years').value = '';
+            document.getElementById('has_promo').checked = false;
+            document.getElementById('sort_by').value = 'price';
+            document.getElementById('sort_order').value = 'asc';
+            document.getElementById('limit').value = '50';
+        }
+
+        async function searchPricing() {
+            const resultsDiv = document.getElementById('pricing-results');
+            resultsDiv.innerHTML = '<div class="loading"><div class="spinner"></div>Loading pricing data...</div>';
+
+            const params = new URLSearchParams();
+            
+            const fields = {
+                tld: document.getElementById('tld').value,
+                registrar: document.getElementById('registrar').value,
+                operation: document.getElementById('operation').value,
+                min_price: document.getElementById('min_price').value,
+                max_price: document.getElementById('max_price').value,
+                currency: document.getElementById('currency').value,
+                years: document.getElementById('years').value,
+                sort_by: document.getElementById('sort_by').value,
+                sort_order: document.getElementById('sort_order').value,
+                limit: document.getElementById('limit').value
+            };
+
+            Object.keys(fields).forEach(key => {
+                if (fields[key]) params.append(key, fields[key]);
+            });
+
+            if (document.getElementById('has_promo').checked) {
+                params.append('has_promo', 'true');
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/pricing?${params}`);
+                const data = await response.json();
+
+                if (data.data.length === 0) {
+                    resultsDiv.innerHTML = '<div class="loading">No results found. Try adjusting your filters.</div>';
+                    return;
+                }
+
+                let html = `
+                    <div class="result-header">
+                        <div class="result-count">
+                            Found ${data.filtered_records} results (of ${data.total_records} total records)
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>TLD</th>
+                                    <th>Registrar</th>
+                                    <th>Operation</th>
+                                    <th>Price</th>
+                                    <th>Years</th>
+                                    <th>Promo Code</th>
+                                    <th>Notes</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                `;
+
+                data.data.forEach(item => {
+                    const promoDisplay = item.promo_code ? 
+                        `<span class="promo-badge">${item.promo_code}</span>` : 
+                        '-';
+                    
+                    html += `
+                        <tr>
+                            <td><strong>${item.tld}</strong></td>
+                            <td>${item.registrar}</td>
+                            <td>${item.operation}</td>
+                            <td class="price">${item.currency} ${item.price.toFixed(2)}</td>
+                            <td>${item.years}</td>
+                            <td>${promoDisplay}</td>
+                            <td>${item.pricing_notes || '-'}</td>
+                        </tr>
+                    `;
+                });
+
+                html += `
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+
+                resultsDiv.innerHTML = html;
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        async function searchCheapest() {
+            const resultsDiv = document.getElementById('cheapest-results');
+            resultsDiv.innerHTML = '<div class="loading"><div class="spinner"></div>Finding cheapest deals...</div>';
+
+            const params = new URLSearchParams();
+            
+            const tld = document.getElementById('cheapest_tld').value;
+            const operation = document.getElementById('cheapest_operation').value;
+            const currency = document.getElementById('cheapest_currency').value;
+            const groupBy = document.getElementById('group_by').value;
+
+            if (tld) params.append('tld', tld);
+            if (operation) params.append('operation', operation);
+            if (currency) params.append('currency', currency);
+            params.append('group_by', groupBy);
+
+            try {
+                const response = await fetch(`${API_BASE}/pricing/cheapest?${params}`);
+                const data = await response.json();
+
+                if (data.data.length === 0) {
+                    resultsDiv.innerHTML = '<div class="loading">No results found.</div>';
+                    return;
+                }
+
+                let html = `
+                    <div class="result-header">
+                        <div class="result-count">
+                            Found ${data.total_results} cheapest options (grouped by ${data.group_by})
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>TLD</th>
+                                    <th>Registrar</th>
+                                    <th>Operation</th>
+                                    <th>Price</th>
+                                    <th>Years</th>
+                                    <th>Promo Code</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                `;
+
+                data.data.forEach(item => {
+                    const promoDisplay = item.promo_code ? 
+                        `<span class="promo-badge">${item.promo_code}</span>` : 
+                        '-';
+                    
+                    html += `
+                        <tr>
+                            <td><strong>${item.tld}</strong></td>
+                            <td>${item.registrar}</td>
+                            <td>${item.operation}</td>
+                            <td class="price">${item.currency} ${item.price.toFixed(2)}</td>
+                            <td>${item.years}</td>
+                            <td>${promoDisplay}</td>
+                        </tr>
+                    `;
+                });
+
+                html += `
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+
+                resultsDiv.innerHTML = html;
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        async function loadStats() {
+            const resultsDiv = document.getElementById('stats-results');
+            resultsDiv.innerHTML = '<div class="loading"><div class="spinner"></div>Loading statistics...</div>';
+
+            try {
+                const response = await fetch(`${API_BASE}/pricing/stats`);
+                const data = await response.json();
+
+                let html = `
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-label">Total Records</div>
+                            <div class="stat-value">${data.total_records}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Unique TLDs</div>
+                            <div class="stat-value">${data.unique_tlds}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Registrars</div>
+                            <div class="stat-value">${data.unique_registrars}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">With Promo Codes</div>
+                            <div class="stat-value">${data.records_with_promo}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Min Price</div>
+                            <div class="stat-value">$${data.price_stats.min.toFixed(2)}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Max Price</div>
+                            <div class="stat-value">$${data.price_stats.max.toFixed(2)}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Avg Price</div>
+                            <div class="stat-value">$${data.price_stats.avg.toFixed(2)}</div>
+                        </div>
+                    </div>
+
+                    <h3 style="margin-top: 30px; margin-bottom: 15px;">Available TLDs</h3>
+                    <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                        ${data.tlds.map(tld => `<span style="background: #f0f0f0; padding: 8px 16px; border-radius: 20px; font-weight: 600;">${tld}</span>`).join('')}
+                    </div>
+
+                    <h3 style="margin-top: 30px; margin-bottom: 15px;">Registrars</h3>
+                    <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                        ${data.registrars.map(reg => `<span style="background: #e8f4f8; padding: 8px 16px; border-radius: 20px; font-weight: 600;">${reg}</span>`).join('')}
+                    </div>
+                `;
+
+                resultsDiv.innerHTML = html;
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        async function triggerAutomation() {
+            const resultsDiv = document.getElementById('automation-results');
+            resultsDiv.innerHTML = '<div class="loading"><div class="spinner"></div>Starting automation...</div>';
+
+            const url = document.getElementById('automation_url').value;
+            const timeout = parseInt(document.getElementById('timeout').value);
+            const headless = document.getElementById('headless').checked;
+
+            try {
+                const response = await fetch(`${API_BASE}/automate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        url: url,
+                        timeout: timeout,
+                        headless: headless
+                    })
+                });
+
+                const data = await response.json();
+
+                let html = `
+                    <div class="success">
+                        ✅ Automation task started successfully!<br>
+                        <strong>Task ID:</strong> ${data.task_id}<br>
+                        <strong>Status:</strong> <span class="status-badge status-${data.status}">${data.status}</span>
+                    </div>
+                    <div style="margin-top: 20px;">
+                        <button class="btn" onclick="checkStatus('${data.task_id}')">Check Status</button>
+                    </div>
+                    <div id="status-container"></div>
+                `;
+
+                resultsDiv.innerHTML = html;
+
+                // Auto-check status after 2 seconds
+                setTimeout(() => checkStatus(data.task_id), 2000);
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+            }
+        }
+
+        async function checkStatus(taskId) {
+            const statusDiv = document.getElementById('status-container');
+            
+            try {
+                const response = await fetch(`${API_BASE}/automation/${taskId}`);
+                const data = await response.json();
+
+                let html = `
+                    <div style="margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 8px;">
+                        <h3>Task Status</h3>
+                        <p><strong>Status:</strong> <span class="status-badge status-${data.status}">${data.status}</span></p>
+                        <p><strong>URL:</strong> ${data.url}</p>
+                        <p><strong>Created:</strong> ${new Date(data.created_at).toLocaleString()}</p>
+                `;
+
+                if (data.completed_at) {
+                    html += `<p><strong>Completed:</strong> ${new Date(data.completed_at).toLocaleString()}</p>`;
+                }
+
+                if (data.error) {
+                    html += `<p style="color: #d63031;"><strong>Error:</strong> ${data.error}</p>`;
+                }
+
+                if (data.result) {
+                    html += `<p><strong>Result:</strong> <pre style="background: white; padding: 10px; border-radius: 4px; overflow-x: auto;">${JSON.stringify(data.result, null, 2)}</pre></p>`;
+                }
+
+                html += '</div>';
+
+                statusDiv.innerHTML = html;
+
+                // Auto-refresh if still running
+                if (data.status === 'running' || data.status === 'queued') {
+                    setTimeout(() => checkStatus(taskId), 3000);
+                }
+            } catch (error) {
+                statusDiv.innerHTML = `<div class="error">Error checking status: ${error.message}</div>`;
+            }
+        }
+    </script>
+</body>
+</html>
