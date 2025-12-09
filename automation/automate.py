@@ -9,12 +9,123 @@ from typing import Dict, Any, List
 import logging
 from datetime import datetime
 import time
-import openpyxl
-from openpyxl import Workbook
 import re
 import json
+import sqlite3
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def get_db_connection(db_path: str = "domain_pricing.db"):
+    """
+    Context manager for database connections
+    
+    Args:
+        db_path: Path to SQLite database file
+        
+    Yields:
+        SQLite connection object
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
+
+
+def init_database(db_path: str = "domain_pricing.db"):
+    """
+    Initialize SQLite database with required tables
+    
+    Args:
+        db_path: Path to SQLite database file
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Create raw_data table for unprocessed scraped data
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS raw_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                row_number INTEGER,
+                domain TEXT,
+                column_name TEXT,
+                cell_value TEXT,
+                scraped_at TEXT,
+                source_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create structured_pricing table for processed pricing data
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS structured_pricing (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                tld TEXT NOT NULL,
+                registrar TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                price REAL,
+                currency TEXT DEFAULT 'USD',
+                years INTEGER DEFAULT 1,
+                pricing_notes TEXT,
+                promo_code TEXT,
+                scraped_at TEXT,
+                source_url TEXT,
+                column_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(task_id, tld, registrar, operation, column_name)
+            )
+        """)
+        
+        # Create scraping_tasks table to track scraping jobs
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scraping_tasks (
+                task_id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                status TEXT NOT NULL,
+                page_title TEXT,
+                rows_extracted INTEGER DEFAULT 0,
+                structured_records INTEGER DEFAULT 0,
+                columns INTEGER DEFAULT 0,
+                headers TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                error_message TEXT
+            )
+        """)
+        
+        # Create indexes for better query performance
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structured_tld 
+            ON structured_pricing(tld)
+        """)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structured_registrar 
+            ON structured_pricing(registrar)
+        """)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_structured_operation 
+            ON structured_pricing(operation)
+        """)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_raw_task 
+            ON raw_data(task_id)
+        """)
+        
+        conn.commit()
+        logger.info("Database initialized successfully")
 
 
 def setup_driver(headless: bool = False) -> webdriver.Chrome:
@@ -45,8 +156,6 @@ def setup_driver(headless: bool = False) -> webdriver.Chrome:
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
-    
-    # Ensure no headless flags are accidentally set
     chrome_options.add_experimental_option("detach", True)
     
     # Initialize driver
@@ -66,11 +175,9 @@ def extract_registrar_from_url(url: str) -> str:
     Returns:
         Registrar name (domain name without TLD)
     """
-    # Extract domain from URL
     match = re.search(r'https?://(?:www\.)?([^/]+)', url)
     if match:
         domain = match.group(1)
-        # Get the main domain name (e.g., 'porkbun' from 'porkbun.com')
         parts = domain.split('.')
         if len(parts) >= 2:
             return parts[0]
@@ -99,7 +206,6 @@ def parse_price_data(cell_value: str) -> Dict[str, Any]:
     if not cell_value or cell_value.strip() == "":
         return result
     
-    # Debug: Log the raw cell value
     logger.debug(f"Parsing cell value: {repr(cell_value[:100])}")
     
     lines = cell_value.strip().split('\n')
@@ -117,12 +223,11 @@ def parse_price_data(cell_value: str) -> Dict[str, Any]:
         logger.debug(f"Found promo code: {result['promo_code']}")
     
     # Look for price with currency symbol
-    # Handles formats like: $9.99, £9.99, €9.99, £➜ $12.71
     price_patterns = [
-        (r'\$(\d+\.?\d*)', 'USD'),  # Dollar
-        (r'£➜\s*\$(\d+\.?\d*)', 'USD'),  # Pound converted to dollar  
-        (r'£(\d+\.?\d*)', 'GBP'),  # Pound
-        (r'€(\d+\.?\d*)', 'EUR'),  # Euro
+        (r'\$(\d+\.?\d*)', 'USD'),
+        (r'£➜\s*\$(\d+\.?\d*)', 'USD'),
+        (r'£(\d+\.?\d*)', 'GBP'),
+        (r'€(\d+\.?\d*)', 'EUR'),
     ]
     
     for pattern, currency in price_patterns:
@@ -130,13 +235,13 @@ def parse_price_data(cell_value: str) -> Dict[str, Any]:
         if price_match:
             result["price"] = float(price_match.group(1))
             result["currency"] = currency
-            logger.debug(f"Found price: {result['price']} {currency} using pattern {pattern}")
+            logger.debug(f"Found price: {result['price']} {currency}")
             break
     
     if result["price"] is None:
         logger.warning(f"Could not extract price from: {repr(cell_value[:100])}")
     
-    # Check for special notes like "registration" or "renewal"
+    # Check for special notes
     if "registration" in cell_value.lower():
         if result["pricing_notes"]:
             result["pricing_notes"] += ", registration price"
@@ -144,7 +249,6 @@ def parse_price_data(cell_value: str) -> Dict[str, Any]:
             result["pricing_notes"] = "registration price"
     
     if "renewal" in cell_value.lower() and "registration" in cell_value.lower():
-        # This is a multi-year value with different prices
         if result["pricing_notes"]:
             result["pricing_notes"] += ", includes renewal"
         else:
@@ -172,62 +276,87 @@ def map_column_to_operation(column_name: str) -> str:
     elif "transfer" in column_lower:
         return "transfer"
     elif "value" in column_lower or "year" in column_lower:
-        # Special case for "Best 3 Year Value"
         return "multi_year"
     else:
         return "unknown"
 
 
-def process_excel_to_structured_data(excel_filename: str, url: str, task_id: str) -> List[Dict[str, Any]]:
+def save_raw_data_to_db(headers: List[str], rows_data: List[List[str]], 
+                        task_id: str, url: str, db_path: str = "domain_pricing.db"):
     """
-    Process Excel file and convert to structured format
+    Save raw scraped data to database
     
     Args:
-        excel_filename: Path to Excel file
-        url: Source URL for registrar extraction
+        headers: List of column headers
+        rows_data: List of row data
         task_id: Task identifier
+        url: Source URL
+        db_path: Path to SQLite database
+    """
+    scraped_at = datetime.now().isoformat()
+    
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        for row_num, row in enumerate(rows_data, start=1):
+            # First column is the domain/TLD
+            domain = row[0] if row else ""
+            
+            # Save each cell as a separate record
+            for col_idx, cell_value in enumerate(row[1:], start=1):
+                if col_idx < len(headers):
+                    column_name = headers[col_idx]
+                    
+                    cursor.execute("""
+                        INSERT INTO raw_data (task_id, row_number, domain, column_name, 
+                                            cell_value, scraped_at, source_url)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (task_id, row_num, domain, column_name, cell_value, 
+                          scraped_at, url))
+        
+        logger.info(f"Task {task_id}: Saved {len(rows_data)} raw data rows to database")
+
+
+def process_and_save_structured_data(headers: List[str], rows_data: List[List[str]], 
+                                     task_id: str, url: str, 
+                                     db_path: str = "domain_pricing.db") -> int:
+    """
+    Process raw data and save structured pricing data to database
+    
+    Args:
+        headers: List of column headers
+        rows_data: List of row data
+        task_id: Task identifier
+        url: Source URL
+        db_path: Path to SQLite database
         
     Returns:
-        List of structured data dictionaries
+        Number of structured records created
     """
-    structured_data = []
     scraped_at = datetime.now().isoformat()
     registrar_from_url = extract_registrar_from_url(url)
+    records_count = 0
     
-    try:
-        # Load the Excel file
-        workbook = openpyxl.load_workbook(excel_filename)
-        sheet = workbook.active
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
         
-        # Get headers (first row) - include ALL cells
-        headers = []
-        for cell in sheet[1]:
-            headers.append(str(cell.value).strip() if cell.value else "")
-        
-        logger.info(f"Task {task_id}: Processing {len(headers)} columns")
-        logger.info(f"Task {task_id}: Headers: {headers}")
-        
-        # Process each data row (skip header row)
-        for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
-            if not row or not any(row):  # Skip empty rows
+        for row_idx, row in enumerate(rows_data, start=2):
+            if not row or not any(row):
                 continue
             
-            # According to your example, column 0 is empty and column 1 has the TLD
-            # Let's check both first and second columns for TLD
+            # Get TLD from first or second column
             tld = ""
             tld_col_idx = -1
             
-            # Check first column
             if row[0] and str(row[0]).strip():
                 tld = str(row[0]).strip()
                 tld_col_idx = 0
-            # If first column is empty, check second column
             elif len(row) > 1 and row[1] and str(row[1]).strip():
                 tld = str(row[1]).strip()
                 tld_col_idx = 1
             
             if not tld or not tld.startswith('.'):
-                logger.warning(f"Task {task_id}: Row {row_idx} has no valid TLD (found: '{row[0]}', '{row[1] if len(row) > 1 else 'N/A'}'), skipping")
+                logger.warning(f"Task {task_id}: Row {row_idx} has no valid TLD, skipping")
                 continue
             
             logger.info(f"Task {task_id}: Processing row {row_idx} - TLD: {tld}")
@@ -241,100 +370,122 @@ def process_excel_to_structured_data(excel_filename: str, url: str, task_id: str
                 cell_value = row[col_idx]
                 column_name = headers[col_idx]
                 
-                # Skip if column name or cell value is empty
                 if not column_name or not cell_value or str(cell_value).strip() == "":
                     continue
                 
                 operation = map_column_to_operation(column_name)
-                
-                # Parse price data from cell
                 price_info = parse_price_data(str(cell_value))
                 
                 if price_info["price"] is None:
-                    logger.warning(f"Task {task_id}: No price found in row {row_idx}, column '{column_name}' - Value: '{str(cell_value)[:50]}'")
+                    logger.warning(f"Task {task_id}: No price in row {row_idx}, column '{column_name}'")
                     continue
                 
-                # Create structured record
-                record = {
-                    "tld": tld,
-                    "registrar": price_info["registrar"] if price_info["registrar"] else registrar_from_url,
-                    "operation": operation,
-                    "price": price_info["price"],
-                    "currency": price_info["currency"],
-                    "years": 3 if operation == "multi_year" else 1,
-                    "pricing_notes": price_info["pricing_notes"],
-                    "promo_code": price_info["promo_code"],
-                    "scraped_at": scraped_at,
-                    "source_url": url,
-                    "column_name": column_name
-                }
-                
-                structured_data.append(record)
-                logger.info(f"Task {task_id}: Added record - TLD: {tld}, Registrar: {record['registrar']}, Operation: {operation}, Price: {price_info['price']}")
+                # Insert structured record (ignore duplicates)
+                try:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO structured_pricing 
+                        (task_id, tld, registrar, operation, price, currency, years, 
+                         pricing_notes, promo_code, scraped_at, source_url, column_name)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        task_id,
+                        tld,
+                        price_info["registrar"] if price_info["registrar"] else registrar_from_url,
+                        operation,
+                        price_info["price"],
+                        price_info["currency"],
+                        3 if operation == "multi_year" else 1,
+                        price_info["pricing_notes"],
+                        price_info["promo_code"],
+                        scraped_at,
+                        url,
+                        column_name
+                    ))
+                    
+                    records_count += 1
+                    logger.info(f"Task {task_id}: Added record - TLD: {tld}, "
+                              f"Registrar: {price_info['registrar'] or registrar_from_url}, "
+                              f"Operation: {operation}, Price: {price_info['price']}")
+                except sqlite3.IntegrityError as e:
+                    logger.warning(f"Task {task_id}: Duplicate record skipped - {e}")
         
-        logger.info(f"Task {task_id}: Successfully processed {len(structured_data)} records from Excel")
-        
-    except Exception as e:
-        logger.error(f"Task {task_id}: Error processing Excel file: {e}")
-        import traceback
-        logger.error(f"Task {task_id}: Traceback: {traceback.format_exc()}")
+        logger.info(f"Task {task_id}: Saved {records_count} structured records to database")
     
-    return structured_data
+    return records_count
 
 
-def save_structured_data(structured_data: List[Dict[str, Any]], task_id: str) -> str:
+def save_task_info(task_id: str, url: str, status: str, 
+                   page_title: str = None, rows_extracted: int = 0,
+                   structured_records: int = 0, columns: int = 0,
+                   headers: List[str] = None, error_message: str = None,
+                   db_path: str = "domain_pricing.db"):
     """
-    Save structured data to JSON and Excel files
+    Save or update task information in database
     
     Args:
-        structured_data: List of structured records
         task_id: Task identifier
+        url: Source URL
+        status: Task status (started, completed, failed)
+        page_title: Page title
+        rows_extracted: Number of rows extracted
+        structured_records: Number of structured records created
+        columns: Number of columns
+        headers: List of headers
+        error_message: Error message if failed
+        db_path: Path to SQLite database
+    """
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        headers_json = json.dumps(headers) if headers else None
+        now = datetime.now().isoformat()
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO scraping_tasks 
+            (task_id, url, status, page_title, rows_extracted, structured_records, 
+             columns, headers, started_at, completed_at, error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 
+                    COALESCE((SELECT started_at FROM scraping_tasks WHERE task_id = ?), ?),
+                    ?, ?)
+        """, (task_id, url, status, page_title, rows_extracted, structured_records,
+              columns, headers_json, task_id, now, 
+              now if status == 'completed' else None, error_message))
+
+
+def export_to_json(task_id: str, db_path: str = "domain_pricing.db") -> str:
+    """
+    Export structured data for a task to JSON file
+    
+    Args:
+        task_id: Task identifier
+        db_path: Path to SQLite database
         
     Returns:
         Path to JSON file
     """
-    # Save as JSON
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT tld, registrar, operation, price, currency, years, 
+                   pricing_notes, promo_code, scraped_at, source_url, column_name
+            FROM structured_pricing
+            WHERE task_id = ?
+            ORDER BY tld, operation
+        """, (task_id,))
+        
+        rows = cursor.fetchall()
+        data = [dict(row) for row in rows]
+    
     json_filename = f"structured_data_{task_id}.json"
     with open(json_filename, 'w', encoding='utf-8') as f:
-        json.dump(structured_data, f, indent=2, ensure_ascii=False)
-    logger.info(f"Task {task_id}: Structured data saved to {json_filename}")
+        json.dump(data, f, indent=2, ensure_ascii=False)
     
-    # Save as Excel
-    excel_filename = f"structured_data_{task_id}.xlsx"
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Structured Data"
-    
-    # Write headers
-    if structured_data:
-        headers = list(structured_data[0].keys())
-        sheet.append(headers)
-        
-        # Write data
-        for record in structured_data:
-            row = [record.get(header, "") for header in headers]
-            sheet.append(row)
-        
-        # Auto-adjust column widths
-        for column in sheet.columns:
-            max_length = 0
-            column_letter = column[0].column_letter
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = min(max_length + 2, 50)
-            sheet.column_dimensions[column_letter].width = adjusted_width
-    
-    workbook.save(excel_filename)
-    logger.info(f"Task {task_id}: Structured data saved to {excel_filename}")
-    
+    logger.info(f"Task {task_id}: Exported {len(data)} records to {json_filename}")
     return json_filename
 
 
-def run_automation(task_id: str, url: str, timeout: int, headless: bool) -> Dict[str, Any]:
+def run_automation(task_id: str, url: str, timeout: int, headless: bool,
+                   db_path: str = "domain_pricing.db") -> Dict[str, Any]:
     """
     Main automation function
     
@@ -343,14 +494,21 @@ def run_automation(task_id: str, url: str, timeout: int, headless: bool) -> Dict
         url: Target website URL
         timeout: Maximum wait time for elements
         headless: Run in headless mode
+        db_path: Path to SQLite database
         
     Returns:
         Dictionary containing automation results or error information
     """
     driver = None
     
+    # Initialize database
+    init_database(db_path)
+    
     try:
         logger.info(f"Task {task_id}: Starting automation for {url}")
+        
+        # Save initial task info
+        save_task_info(task_id, url, "started", db_path=db_path)
         
         # Setup driver
         driver = setup_driver(headless=headless)
@@ -361,152 +519,105 @@ def run_automation(task_id: str, url: str, timeout: int, headless: bool) -> Dict
         
         # Wait for page to load
         wait = WebDriverWait(driver, timeout)
-        
-        # Wait for body element to be present
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        
-        # ===== EXTRACT TABLE DATA AND SAVE TO EXCEL =====
         
         page_title = driver.title
         logger.info(f"Task {task_id}: Page title: {page_title}")
         
-        # Wait for the specific table to load
+        # Wait for table to load
         logger.info(f"Task {task_id}: Waiting for table to load...")
         table = wait.until(EC.presence_of_element_located(
             (By.XPATH, "(//table[@id='DataTables_Table_0'])[1]")
         ))
         logger.info(f"Task {task_id}: Table found!")
         
-        # Extract table headers from the correct location
+        # Extract headers
         headers = []
         try:
-            # Get headers from the dataTables_scrollHeadInner div
-            header_cells = driver.find_elements(By.XPATH, "//div[contains(@class,'dataTables_scrollHeadInner')]//thead//tr//th")
+            header_cells = driver.find_elements(By.XPATH, 
+                "//div[contains(@class,'dataTables_scrollHeadInner')]//thead//tr//th")
             headers = [cell.text.strip() for cell in header_cells if cell.text.strip()]
             
-            # Add empty first column to align with data rows that have domain in first column
             if headers:
-                headers.insert(0, "Domain")  # Insert "Domain" as first column header
-                logger.info(f"Task {task_id}: Found {len(headers)} headers (with Domain added): {headers}")
-            else:
+                headers.insert(0, "Domain")
                 logger.info(f"Task {task_id}: Found {len(headers)} headers: {headers}")
         except Exception as e:
             logger.warning(f"Task {task_id}: Could not extract headers: {e}")
-            headers = []
         
-        # Extract table rows from multiple pages (pagination)
+        # Extract table rows from multiple pages
         rows_data = []
         
-        # Find the second-last <li> which contains the last page number
-        last_page_element = driver.find_element(By.XPATH, "//div[@id='DataTables_Table_0_paginate']//li[last()-1]")
-
-        # Extract the text and convert to integer
+        # Find total pages
+        last_page_element = driver.find_element(By.XPATH, 
+            "//div[@id='DataTables_Table_0_paginate']//li[last()-1]")
         pages_to_scrape = int(last_page_element.text)
-
-        print("Total pages:", pages_to_scrape)
+        print(f"Total pages: {pages_to_scrape}")
         
-        try:
-            for page_num in range(pages_to_scrape):
-                logger.info(f"Task {task_id}: Extracting data from page {page_num + 1}...")
-                
-                # Wait a bit for the page to load
-                time.sleep(2)
-                
-                # Get all rows from tbody of the first table
-                table_rows = driver.find_elements(By.XPATH, "(//table[@id='DataTables_Table_0'])[1]//tbody//tr")
-                logger.info(f"Task {task_id}: Found {len(table_rows)} rows on page {page_num + 1}")
-                
-                for idx, row in enumerate(table_rows):
-                    try:
-                        # Get the row ID (domain name)
-                        row_id = row.get_attribute('id')
-                        
-                        # Extract all cells in this row
-                        cells = row.find_elements(By.TAG_NAME, "td")
-                        row_data = [cell.text.strip() for cell in cells]
-                        
-                        if row_data:  # Only add non-empty rows
-                            rows_data.append(row_data)
-                            logger.debug(f"Task {task_id}: Row {idx} (id={row_id}): {row_data[:3]}...")  # Log first 3 cells
-                        
-                    except Exception as row_error:
-                        logger.warning(f"Task {task_id}: Error extracting row {idx}: {row_error}")
-                        continue
-                
-                logger.info(f"Task {task_id}: Extracted {len(table_rows)} rows from page {page_num + 1}. Total rows so far: {len(rows_data)}")
-                
-                # Click Next button if not on the last page
-                if page_num < pages_to_scrape - 1:
-                    try:
-                        next_button = driver.find_element(By.XPATH, "//*[@id='DataTables_Table_0_next']/a")
-                        
-                        # Check if the Next button is disabled
-                        parent_li = driver.find_element(By.XPATH, "//*[@id='DataTables_Table_0_next']")
-                        if "disabled" in parent_li.get_attribute("class"):
-                            logger.info(f"Task {task_id}: Next button is disabled. No more pages available.")
-                            break
-                        
-                        # Scroll to button and click
-                        driver.execute_script("arguments[0].scrollIntoView(true);", next_button)
-                        time.sleep(1)
-                        next_button.click()
-                        logger.info(f"Task {task_id}: Clicked Next button to go to page {page_num + 2}")
-                        
-                        # Wait for new page to load
-                        time.sleep(2)
-                        
-                    except Exception as click_error:
-                        logger.warning(f"Task {task_id}: Could not click Next button: {click_error}")
-                        break
+        for page_num in range(pages_to_scrape):
+            logger.info(f"Task {task_id}: Extracting data from page {page_num + 1}...")
+            time.sleep(2)
             
-            logger.info(f"Task {task_id}: Successfully extracted {len(rows_data)} total data rows from {page_num + 1} pages")
-        except Exception as e:
-            logger.error(f"Task {task_id}: Error extracting rows: {e}")
-        
-        # Create Excel file with raw data
-        excel_filename = f"table_data_{task_id}.xlsx"
-        workbook = Workbook()
-        sheet = workbook.active
-        sheet.title = "Table Data"
-        
-        # Write headers
-        if headers:
-            sheet.append(headers)
-            logger.info(f"Task {task_id}: Headers written to Excel")
-        
-        # Write data rows
-        for row_data in rows_data:
-            sheet.append(row_data)
-        
-        # Auto-adjust column widths for better readability
-        for column in sheet.columns:
-            max_length = 0
-            column_letter = column[0].column_letter
-            for cell in column:
+            table_rows = driver.find_elements(By.XPATH, 
+                "(//table[@id='DataTables_Table_0'])[1]//tbody//tr")
+            logger.info(f"Task {task_id}: Found {len(table_rows)} rows on page {page_num + 1}")
+            
+            for idx, row in enumerate(table_rows):
                 try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = min(max_length + 2, 50)  # Cap at 50 for very long content
-            sheet.column_dimensions[column_letter].width = adjusted_width
+                    cells = row.find_elements(By.TAG_NAME, "td")
+                    row_data = [cell.text.strip() for cell in cells]
+                    
+                    if row_data:
+                        rows_data.append(row_data)
+                        logger.debug(f"Task {task_id}: Row {idx}: {row_data[:3]}...")
+                except Exception as row_error:
+                    logger.warning(f"Task {task_id}: Error extracting row {idx}: {row_error}")
+                    continue
+            
+            logger.info(f"Task {task_id}: Total rows so far: {len(rows_data)}")
+            
+            # Click Next button if not on last page
+            if page_num < pages_to_scrape - 1:
+                try:
+                    next_button = driver.find_element(By.XPATH, 
+                        "//*[@id='DataTables_Table_0_next']/a")
+                    
+                    parent_li = driver.find_element(By.XPATH, 
+                        "//*[@id='DataTables_Table_0_next']")
+                    if "disabled" in parent_li.get_attribute("class"):
+                        logger.info(f"Task {task_id}: Next button disabled")
+                        break
+                    
+                    driver.execute_script("arguments[0].scrollIntoView(true);", next_button)
+                    time.sleep(1)
+                    next_button.click()
+                    logger.info(f"Task {task_id}: Clicked Next to page {page_num + 2}")
+                    time.sleep(2)
+                except Exception as click_error:
+                    logger.warning(f"Task {task_id}: Could not click Next: {click_error}")
+                    break
         
-        # Save Excel file
-        workbook.save(excel_filename)
-        logger.info(f"Task {task_id}: Raw data saved to {excel_filename}")
+        logger.info(f"Task {task_id}: Extracted {len(rows_data)} total rows")
         
-        # ===== PROCESS DATA INTO STRUCTURED FORMAT =====
-        logger.info(f"Task {task_id}: Processing data into structured format...")
-        structured_data = process_excel_to_structured_data(excel_filename, url, task_id)
+        # Save raw data to database
+        save_raw_data_to_db(headers, rows_data, task_id, url, db_path)
         
-        # Save structured data
-        json_filename = save_structured_data(structured_data, task_id)
+        # Process and save structured data
+        structured_count = process_and_save_structured_data(
+            headers, rows_data, task_id, url, db_path)
         
-        # Keep browser open for 3 seconds so you can see it
+        # Export to JSON (optional)
+        json_filename = export_to_json(task_id, db_path)
+        
+        # Update task info
+        save_task_info(
+            task_id, url, "completed", page_title, 
+            len(rows_data), structured_count, len(headers), headers,
+            db_path=db_path
+        )
+        
+        # Keep browser open briefly
         logger.info(f"Task {task_id}: Browser will remain open for 3 seconds...")
         time.sleep(3)
-        
-        # ===== END OF AUTOMATION LOGIC =====
         
         # Prepare results
         result = {
@@ -514,29 +625,33 @@ def run_automation(task_id: str, url: str, timeout: int, headless: bool) -> Dict
             "result": {
                 "page_title": page_title,
                 "url": driver.current_url,
-                "raw_excel_file": excel_filename,
-                "structured_json_file": json_filename,
-                "structured_excel_file": f"structured_data_{task_id}.xlsx",
+                "database_file": db_path,
+                "json_export_file": json_filename,
                 "rows_extracted": len(rows_data),
-                "structured_records": len(structured_data),
-                "columns": len(headers) if headers else 0,
+                "structured_records": structured_count,
+                "columns": len(headers),
                 "headers": headers,
                 "completed_at": datetime.now().isoformat()
             }
         }
         
         logger.info(f"Task {task_id}: Automation completed successfully")
-        logger.info(f"Task {task_id}: Created {len(structured_data)} structured records")
+        logger.info(f"Task {task_id}: Created {structured_count} structured records in database")
         return result
         
     except Exception as e:
         logger.error(f"Task {task_id}: Error - {str(e)}")
         import traceback
-        logger.error(f"Task {task_id}: Traceback - {traceback.format_exc()}")
+        error_trace = traceback.format_exc()
+        logger.error(f"Task {task_id}: Traceback - {error_trace}")
+        
+        # Save error to database
+        save_task_info(task_id, url, "failed", error_message=str(e), db_path=db_path)
+        
         return {
             "status": "failed",
             "error": str(e),
-            "traceback": traceback.format_exc()
+            "traceback": error_trace
         }
         
     finally:

@@ -6,16 +6,20 @@ from typing import Dict, Any, List, Optional
 import logging
 import uuid
 from datetime import datetime
-import json
 import os
-from pathlib import Path
+import sqlite3
+from contextlib import contextmanager
+from fastapi.staticfiles import StaticFiles
 
 # Import automation function
-from automation.automate import run_automation
+from automation.automate import run_automation, init_database
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Database path
+DB_PATH = "domain_pricing.db"
 
 # FastAPI app
 app = FastAPI(
@@ -29,12 +33,24 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # In production, replace with specific origins
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Store automation results
-automation_results: Dict[str, Dict[str, Any]] = {}
+
+@contextmanager
+def get_db_connection(db_path: str = DB_PATH):
+    """Context manager for database connections"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        conn.close()
 
 
 class AutomationRequest(BaseModel):
@@ -59,8 +75,8 @@ class PricingRecord(BaseModel):
     price: float
     currency: str
     years: int
-    pricing_notes: str
-    promo_code: str
+    pricing_notes: Optional[str]
+    promo_code: Optional[str]
     scraped_at: str
     source_url: str
     column_name: str
@@ -70,39 +86,38 @@ class PricingResponse(BaseModel):
     """Response model for pricing data"""
     total_records: int
     filtered_records: int
-    data: List[PricingRecord]
+    data: List[Dict[str, Any]]
     filters_applied: Dict[str, Any]
 
 
 def load_all_pricing_data() -> List[Dict[str, Any]]:
     """
-    Load all pricing data from JSON files in the current directory
+    Load all pricing data from SQLite database
     
     Returns:
         List of all pricing records
     """
-    all_data = []
-    
-    # Look for all structured_data_*.json files
-    json_files = list(Path(".").glob("structured_data_*.json"))
-    
-    logger.info(f"Found {len(json_files)} pricing data files")
-    
-    for json_file in json_files:
-        try:
-            with open(json_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    all_data.extend(data)
-                    logger.info(f"Loaded {len(data)} records from {json_file}")
-        except Exception as e:
-            logger.error(f"Error loading {json_file}: {e}")
-    
-    return all_data
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT tld, registrar, operation, price, currency, years, 
+                       pricing_notes, promo_code, scraped_at, source_url, column_name
+                FROM structured_pricing
+                ORDER BY scraped_at DESC
+            """)
+            
+            rows = cursor.fetchall()
+            data = [dict(row) for row in rows]
+            
+            logger.info(f"Loaded {len(data)} pricing records from database")
+            return data
+    except Exception as e:
+        logger.error(f"Error loading pricing data: {e}")
+        return []
 
 
 def filter_pricing_data(
-    data: List[Dict[str, Any]],
     tld: Optional[str] = None,
     registrar: Optional[str] = None,
     operation: Optional[str] = None,
@@ -110,13 +125,13 @@ def filter_pricing_data(
     max_price: Optional[float] = None,
     currency: Optional[str] = None,
     years: Optional[int] = None,
-    has_promo: Optional[bool] = None
+    has_promo: Optional[bool] = None,
+    task_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
-    Filter pricing data based on various criteria
+    Filter pricing data based on various criteria using SQL
     
     Args:
-        data: List of pricing records
         tld: Filter by TLD (e.g., '.com', '.io')
         registrar: Filter by registrar name
         operation: Filter by operation type (register, renew, transfer, multi_year)
@@ -125,53 +140,70 @@ def filter_pricing_data(
         currency: Filter by currency (USD, GBP, EUR)
         years: Filter by number of years
         has_promo: Filter records with/without promo codes
+        task_id: Filter by specific scraping task
         
     Returns:
         Filtered list of pricing records
     """
-    filtered = data
+    query = """
+        SELECT tld, registrar, operation, price, currency, years, 
+               pricing_notes, promo_code, scraped_at, source_url, column_name
+        FROM structured_pricing
+        WHERE 1=1
+    """
+    params = []
     
-    # Filter by TLD
+    # Build dynamic WHERE clause
     if tld:
-        tld_lower = tld.lower()
-        if not tld_lower.startswith('.'):
-            tld_lower = '.' + tld_lower
-        filtered = [r for r in filtered if r.get('tld', '').lower() == tld_lower]
+        tld_clean = tld.lower()
+        if not tld_clean.startswith('.'):
+            tld_clean = '.' + tld_clean
+        query += " AND LOWER(tld) = ?"
+        params.append(tld_clean)
     
-    # Filter by registrar
     if registrar:
-        registrar_lower = registrar.lower()
-        filtered = [r for r in filtered if registrar_lower in r.get('registrar', '').lower()]
+        query += " AND LOWER(registrar) LIKE ?"
+        params.append(f"%{registrar.lower()}%")
     
-    # Filter by operation
     if operation:
-        operation_lower = operation.lower()
-        filtered = [r for r in filtered if r.get('operation', '').lower() == operation_lower]
+        query += " AND LOWER(operation) = ?"
+        params.append(operation.lower())
     
-    # Filter by price range
     if min_price is not None:
-        filtered = [r for r in filtered if r.get('price', 0) >= min_price]
+        query += " AND price >= ?"
+        params.append(min_price)
     
     if max_price is not None:
-        filtered = [r for r in filtered if r.get('price', float('inf')) <= max_price]
+        query += " AND price <= ?"
+        params.append(max_price)
     
-    # Filter by currency
     if currency:
-        currency_upper = currency.upper()
-        filtered = [r for r in filtered if r.get('currency', '').upper() == currency_upper]
+        query += " AND UPPER(currency) = ?"
+        params.append(currency.upper())
     
-    # Filter by years
     if years is not None:
-        filtered = [r for r in filtered if r.get('years', 0) == years]
+        query += " AND years = ?"
+        params.append(years)
     
-    # Filter by promo code presence
     if has_promo is not None:
         if has_promo:
-            filtered = [r for r in filtered if r.get('promo_code', '').strip() != '']
+            query += " AND promo_code IS NOT NULL AND promo_code != ''"
         else:
-            filtered = [r for r in filtered if r.get('promo_code', '').strip() == '']
+            query += " AND (promo_code IS NULL OR promo_code = '')"
     
-    return filtered
+    if task_id:
+        query += " AND task_id = ?"
+        params.append(task_id)
+    
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"Error filtering pricing data: {e}")
+        return []
 
 
 def sort_pricing_data(
@@ -206,7 +238,7 @@ def sort_pricing_data(
 
 def execute_automation_task(task_id: str, url: str, timeout: int, headless: bool):
     """
-    Wrapper function to execute automation and store results
+    Wrapper function to execute automation
     
     Args:
         task_id: Unique task identifier
@@ -214,13 +246,20 @@ def execute_automation_task(task_id: str, url: str, timeout: int, headless: bool
         timeout: Maximum wait time for elements
         headless: Run in headless mode
     """
-    automation_results[task_id]["status"] = "running"
+    logger.info(f"Starting automation task {task_id}")
     
-    # Run automation
-    result = run_automation(task_id, url, timeout, headless)
+    # Run automation (now saves to database)
+    result = run_automation(task_id, url, timeout, headless, db_path=DB_PATH)
     
-    # Update results
-    automation_results[task_id].update(result)
+    logger.info(f"Automation task {task_id} completed with status: {result.get('status')}")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup"""
+    logger.info("Initializing database...")
+    init_database(DB_PATH)
+    logger.info("Database initialized successfully")
 
 
 @app.post("/automate", response_model=AutomationResponse)
@@ -240,12 +279,7 @@ async def trigger_automation(
     """
     task_id = str(uuid.uuid4())
     
-    # Initialize task status
-    automation_results[task_id] = {
-        "status": "queued",
-        "created_at": datetime.now().isoformat(),
-        "url": str(request.url)
-    }
+    logger.info(f"Task {task_id} queued for {request.url}")
     
     # Add automation to background tasks
     background_tasks.add_task(
@@ -255,8 +289,6 @@ async def trigger_automation(
         request.timeout,
         request.headless
     )
-    
-    logger.info(f"Task {task_id} queued for {request.url}")
     
     return AutomationResponse(
         task_id=task_id,
@@ -276,22 +308,111 @@ async def get_automation_status(task_id: str):
     Returns:
         Task status and results
     """
-    if task_id not in automation_results:
-        raise HTTPException(status_code=404, detail="Task not found")
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT task_id, url, status, page_title, rows_extracted, 
+                       structured_records, columns, headers, started_at, 
+                       completed_at, error_message
+                FROM scraping_tasks
+                WHERE task_id = ?
+            """, (task_id,))
+            
+            row = cursor.fetchone()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Task not found")
+            
+            result = dict(row)
+            
+            # Parse headers JSON if present
+            if result.get('headers'):
+                import json
+                try:
+                    result['headers'] = json.loads(result['headers'])
+                except:
+                    pass
+            
+            return JSONResponse(content=result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving task status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/automations")
+async def list_automation_tasks(
+    status: Optional[str] = Query(None, description="Filter by status (started, completed, failed)"),
+    limit: int = Query(50, description="Maximum number of results", ge=1, le=1000),
+    offset: int = Query(0, description="Offset for pagination", ge=0)
+):
+    """
+    List all automation tasks
     
-    return JSONResponse(content=automation_results[task_id])
+    Query Parameters:
+        - status: Filter by task status
+        - limit: Maximum number of results
+        - offset: Offset for pagination
+    
+    Returns:
+        List of automation tasks
+    """
+    query = """
+        SELECT task_id, url, status, page_title, rows_extracted, 
+               structured_records, started_at, completed_at
+        FROM scraping_tasks
+        WHERE 1=1
+    """
+    params = []
+    
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+    
+    query += " ORDER BY started_at DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            tasks = [dict(row) for row in rows]
+            
+            # Get total count
+            count_query = "SELECT COUNT(*) as total FROM scraping_tasks WHERE 1=1"
+            count_params = []
+            if status:
+                count_query += " AND status = ?"
+                count_params.append(status)
+            
+            cursor.execute(count_query, count_params)
+            total = cursor.fetchone()['total']
+            
+            return JSONResponse(content={
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "tasks": tasks
+            })
+    except Exception as e:
+        logger.error(f"Error listing tasks: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/pricing", response_model=PricingResponse)
 async def get_pricing_data(
     tld: Optional[str] = Query(None, description="Filter by TLD (e.g., 'com', '.com', 'io')"),
-    registrar: Optional[str] = Query(None, description="Filter by registrar name (e.g., 'spaceship', 'cloudflare')"),
+    registrar: Optional[str] = Query(None, description="Filter by registrar name"),
     operation: Optional[str] = Query(None, description="Filter by operation (register, renew, transfer, multi_year)"),
     min_price: Optional[float] = Query(None, description="Minimum price", ge=0),
     max_price: Optional[float] = Query(None, description="Maximum price", ge=0),
     currency: Optional[str] = Query(None, description="Filter by currency (USD, GBP, EUR)"),
     years: Optional[int] = Query(None, description="Filter by number of years", ge=1),
     has_promo: Optional[bool] = Query(None, description="Filter by promo code availability"),
+    task_id: Optional[str] = Query(None, description="Filter by scraping task ID"),
     sort_by: str = Query('price', description="Sort by field (price, tld, registrar, scraped_at)"),
     sort_order: str = Query('asc', description="Sort order (asc, desc)"),
     limit: Optional[int] = Query(None, description="Limit number of results", ge=1),
@@ -300,37 +421,14 @@ async def get_pricing_data(
     """
     Get pricing data with filters and sorting
     
-    Query Parameters:
-        - tld: Filter by top-level domain (e.g., '.com', 'io')
-        - registrar: Filter by registrar name (partial match)
-        - operation: Filter by operation type
-        - min_price: Minimum price filter
-        - max_price: Maximum price filter
-        - currency: Filter by currency code
-        - years: Filter by registration years
-        - has_promo: Filter by promo code availability
-        - sort_by: Field to sort by
-        - sort_order: Sorting direction (asc/desc)
-        - limit: Maximum number of results to return
-        - offset: Number of records to skip (for pagination)
-    
     Returns:
         Filtered and sorted pricing data
     """
-    # Load all pricing data
+    # Get total count
     all_data = load_all_pricing_data()
-    
-    if not all_data:
-        return PricingResponse(
-            total_records=0,
-            filtered_records=0,
-            data=[],
-            filters_applied={}
-        )
     
     # Apply filters
     filtered_data = filter_pricing_data(
-        all_data,
         tld=tld,
         registrar=registrar,
         operation=operation,
@@ -338,7 +436,8 @@ async def get_pricing_data(
         max_price=max_price,
         currency=currency,
         years=years,
-        has_promo=has_promo
+        has_promo=has_promo,
+        task_id=task_id
     )
     
     # Sort data
@@ -359,6 +458,7 @@ async def get_pricing_data(
         "currency": currency,
         "years": years,
         "has_promo": has_promo,
+        "task_id": task_id,
         "sort_by": sort_by,
         "sort_order": sort_order,
         "limit": limit,
@@ -386,59 +486,60 @@ async def get_cheapest_pricing(
     """
     Get the cheapest pricing for each TLD/operation combination
     
-    Query Parameters:
-        - tld: Filter by specific TLD
-        - operation: Filter by specific operation
-        - currency: Filter by currency
-        - group_by: How to group results (tld, operation, registrar)
-    
     Returns:
         Cheapest pricing options
     """
-    # Load all pricing data
-    all_data = load_all_pricing_data()
+    # Build SQL query for cheapest prices
+    query = """
+        SELECT tld, registrar, operation, MIN(price) as price, currency, 
+               years, pricing_notes, promo_code, scraped_at, source_url, column_name
+        FROM structured_pricing
+        WHERE 1=1
+    """
+    params = []
     
-    if not all_data:
-        return JSONResponse(content={"message": "No pricing data available", "data": []})
+    if tld:
+        tld_clean = tld.lower()
+        if not tld_clean.startswith('.'):
+            tld_clean = '.' + tld_clean
+        query += " AND LOWER(tld) = ?"
+        params.append(tld_clean)
     
-    # Apply filters
-    filtered_data = filter_pricing_data(
-        all_data,
-        tld=tld,
-        operation=operation,
-        currency=currency
-    )
+    if operation:
+        query += " AND LOWER(operation) = ?"
+        params.append(operation.lower())
     
-    if not filtered_data:
-        return JSONResponse(content={"message": "No data matching filters", "data": []})
+    if currency:
+        query += " AND UPPER(currency) = ?"
+        params.append(currency.upper())
     
-    # Group and find cheapest
-    grouped_data = {}
+    # Group by clause based on group_by parameter
+    if group_by == "tld":
+        query += " GROUP BY tld, operation"
+    elif group_by == "operation":
+        query += " GROUP BY operation, tld"
+    elif group_by == "registrar":
+        query += " GROUP BY registrar, tld"
+    else:
+        query += " GROUP BY tld"
     
-    for record in filtered_data:
-        if group_by == "tld":
-            key = (record.get('tld', ''), record.get('operation', ''))
-        elif group_by == "operation":
-            key = (record.get('operation', ''), record.get('tld', ''))
-        elif group_by == "registrar":
-            key = (record.get('registrar', ''), record.get('tld', ''))
-        else:
-            key = record.get('tld', '')
-        
-        if key not in grouped_data or record.get('price', float('inf')) < grouped_data[key].get('price', float('inf')):
-            grouped_data[key] = record
+    query += " ORDER BY price ASC"
     
-    # Convert to list
-    result = list(grouped_data.values())
-    
-    # Sort by price
-    result.sort(key=lambda x: x.get('price', 0))
-    
-    return JSONResponse(content={
-        "total_results": len(result),
-        "group_by": group_by,
-        "data": result
-    })
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            result = [dict(row) for row in rows]
+            
+            return JSONResponse(content={
+                "total_results": len(result),
+                "group_by": group_by,
+                "data": result
+            })
+    except Exception as e:
+        logger.error(f"Error getting cheapest pricing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/pricing/stats")
@@ -449,56 +550,182 @@ async def get_pricing_stats():
     Returns:
         Statistics including available TLDs, registrars, price ranges, etc.
     """
-    all_data = load_all_pricing_data()
-    
-    if not all_data:
-        return JSONResponse(content={"message": "No pricing data available"})
-    
-    # Calculate statistics
-    tlds = set(r.get('tld', '') for r in all_data)
-    registrars = set(r.get('registrar', '') for r in all_data)
-    operations = set(r.get('operation', '') for r in all_data)
-    currencies = set(r.get('currency', '') for r in all_data)
-    
-    prices = [r.get('price', 0) for r in all_data if r.get('price') is not None]
-    
-    stats = {
-        "total_records": len(all_data),
-        "unique_tlds": len(tlds),
-        "tlds": sorted(list(tlds)),
-        "unique_registrars": len(registrars),
-        "registrars": sorted(list(registrars)),
-        "operations": sorted(list(operations)),
-        "currencies": sorted(list(currencies)),
-        "price_stats": {
-            "min": min(prices) if prices else 0,
-            "max": max(prices) if prices else 0,
-            "avg": sum(prices) / len(prices) if prices else 0,
-            "count": len(prices)
-        },
-        "records_with_promo": len([r for r in all_data if r.get('promo_code', '').strip() != ''])
-    }
-    
-    return JSONResponse(content=stats)
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get basic counts
+            cursor.execute("SELECT COUNT(*) as total FROM structured_pricing")
+            total_records = cursor.fetchone()['total']
+            
+            # Get unique TLDs
+            cursor.execute("SELECT DISTINCT tld FROM structured_pricing ORDER BY tld")
+            tlds = [row['tld'] for row in cursor.fetchall()]
+            
+            # Get unique registrars
+            cursor.execute("SELECT DISTINCT registrar FROM structured_pricing ORDER BY registrar")
+            registrars = [row['registrar'] for row in cursor.fetchall()]
+            
+            # Get unique operations
+            cursor.execute("SELECT DISTINCT operation FROM structured_pricing ORDER BY operation")
+            operations = [row['operation'] for row in cursor.fetchall()]
+            
+            # Get unique currencies
+            cursor.execute("SELECT DISTINCT currency FROM structured_pricing ORDER BY currency")
+            currencies = [row['currency'] for row in cursor.fetchall()]
+            
+            # Get price statistics
+            cursor.execute("""
+                SELECT 
+                    MIN(price) as min_price,
+                    MAX(price) as max_price,
+                    AVG(price) as avg_price,
+                    COUNT(price) as price_count
+                FROM structured_pricing
+                WHERE price IS NOT NULL
+            """)
+            price_stats = dict(cursor.fetchone())
+            
+            # Get promo count
+            cursor.execute("""
+                SELECT COUNT(*) as promo_count
+                FROM structured_pricing
+                WHERE promo_code IS NOT NULL AND promo_code != ''
+            """)
+            promo_count = cursor.fetchone()['promo_count']
+            
+            stats = {
+                "total_records": total_records,
+                "unique_tlds": len(tlds),
+                "tlds": tlds,
+                "unique_registrars": len(registrars),
+                "registrars": registrars,
+                "operations": operations,
+                "currencies": currencies,
+                "price_stats": {
+                    "min": price_stats['min_price'] or 0,
+                    "max": price_stats['max_price'] or 0,
+                    "avg": price_stats['avg_price'] or 0,
+                    "count": price_stats['price_count'] or 0
+                },
+                "records_with_promo": promo_count
+            }
+            
+            return JSONResponse(content=stats)
+    except Exception as e:
+        logger.error(f"Error getting pricing stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/")
-async def root():
-    """Root endpoint with API information"""
-    return {
-        "message": "Selenium Automation API",
-        "version": "1.0.0",
-        "endpoints": {
-            "POST /automate": "Trigger automation task",
-            "GET /automation/{task_id}": "Get automation task status",
-            "GET /pricing": "Get pricing data with filters",
-            "GET /pricing/cheapest": "Get cheapest prices",
-            "GET /pricing/stats": "Get pricing statistics"
-        }
-    }
+@app.get("/pricing/compare")
+async def compare_registrars(
+    tld: str = Query(..., description="TLD to compare (e.g., 'com', '.com')"),
+    operation: str = Query("register", description="Operation to compare (register, renew, transfer)")
+):
+    """
+    Compare prices across all registrars for a specific TLD and operation
+    
+    Args:
+        tld: The TLD to compare
+        operation: The operation type
+        
+    Returns:
+        Comparison of prices across registrars
+    """
+    tld_clean = tld.lower()
+    if not tld_clean.startswith('.'):
+        tld_clean = '.' + tld_clean
+    
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT registrar, MIN(price) as price, currency, 
+                       pricing_notes, promo_code, source_url
+                FROM structured_pricing
+                WHERE LOWER(tld) = ? AND LOWER(operation) = ?
+                GROUP BY registrar
+                ORDER BY price ASC
+            """, (tld_clean, operation.lower()))
+            
+            rows = cursor.fetchall()
+            result = [dict(row) for row in rows]
+            
+            if not result:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"No pricing data found for {tld} ({operation})"
+                )
+            
+            return JSONResponse(content={
+                "tld": tld_clean,
+                "operation": operation,
+                "registrar_count": len(result),
+                "cheapest": result[0] if result else None,
+                "most_expensive": result[-1] if result else None,
+                "all_prices": result
+            })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error comparing registrars: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/pricing")
+async def delete_pricing_data(
+    task_id: Optional[str] = Query(None, description="Delete data for specific task"),
+    confirm: bool = Query(False, description="Confirmation flag")
+):
+    """
+    Delete pricing data (use with caution!)
+    
+    Args:
+        task_id: Optional task ID to delete specific task data
+        confirm: Must be True to proceed with deletion
+        
+    Returns:
+        Deletion status
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400, 
+            detail="Deletion requires confirm=true parameter"
+        )
+    
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            if task_id:
+                # Delete specific task data
+                cursor.execute("DELETE FROM structured_pricing WHERE task_id = ?", (task_id,))
+                cursor.execute("DELETE FROM raw_data WHERE task_id = ?", (task_id,))
+                cursor.execute("DELETE FROM scraping_tasks WHERE task_id = ?", (task_id,))
+                deleted_count = cursor.rowcount
+                message = f"Deleted data for task {task_id}"
+            else:
+                # Delete all data
+                cursor.execute("DELETE FROM structured_pricing")
+                cursor.execute("DELETE FROM raw_data")
+                cursor.execute("DELETE FROM scraping_tasks")
+                deleted_count = cursor.rowcount
+                message = "Deleted all pricing data"
+            
+            return JSONResponse(content={
+                "message": message,
+                "deleted_records": deleted_count
+            })
+    except Exception as e:
+        logger.error(f"Error deleting pricing data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Mount static files
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8080))  # Changed from 8000 to 8080 and added PORT env var
+    port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
